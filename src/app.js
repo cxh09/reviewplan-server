@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 
 import cors from 'cors'
 import express from 'express'
@@ -8,6 +9,28 @@ import { APP_VERSION } from './config.js'
 
 /** 请求体上限，整份快照不大，5mb 足够 */
 const BODY_LIMIT = '5mb'
+
+/** 分享链接 code 的字符集（base62）与长度 */
+const SHARE_CODE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+const SHARE_CODE_LENGTH = 10
+/** 单次分享的日期跨度上限（天） */
+const SHARE_MAX_SPAN_DAYS = 92
+
+function randomShareCode() {
+  const bytes = crypto.randomBytes(SHARE_CODE_LENGTH)
+  let code = ''
+  for (let i = 0; i < SHARE_CODE_LENGTH; i += 1) {
+    code += SHARE_CODE_ALPHABET[bytes[i] % SHARE_CODE_ALPHABET.length]
+  }
+  return code
+}
+
+/** 形如 YYYY-MM-DD 且能原样解析回同一天的真实日期 */
+function isDateKey(key) {
+  if (typeof key !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(key)) return false
+  const date = new Date(`${key}T00:00:00Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === key
+}
 
 function createCorsOptions(corsOrigin) {
   if (!corsOrigin || corsOrigin === '*') return { origin: '*' }
@@ -79,6 +102,69 @@ export function createApp({ config, repository }) {
     }
 
     res.json({ rev: result.rev, updatedAt: result.updatedAt })
+  })
+
+  /** 创建分享链接：只登记日期范围，访问时再实时裁剪当前日程 */
+  app.post('/api/shares', requireToken, (req, res) => {
+    const { dateStart, dateEnd } = req.body || {}
+    if (!isDateKey(dateStart) || !isDateKey(dateEnd)) {
+      return res
+        .status(400)
+        .json({ code: 'BAD_REQUEST', error: '日期范围不合法' })
+    }
+    if (dateStart > dateEnd) {
+      return res
+        .status(400)
+        .json({ code: 'BAD_REQUEST', error: '开始日期不能晚于结束日期' })
+    }
+    const spanDays =
+      (Date.parse(`${dateEnd}T00:00:00Z`) - Date.parse(`${dateStart}T00:00:00Z`)) / 86400000
+    if (spanDays > SHARE_MAX_SPAN_DAYS) {
+      return res
+        .status(400)
+        .json({ code: 'BAD_REQUEST', error: `分享日期跨度最多 ${SHARE_MAX_SPAN_DAYS} 天` })
+    }
+
+    // 随机 code 冲突概率极低，撞上了重试几次
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const code = randomShareCode()
+      if (repository.getShare(code)) continue
+      try {
+        repository.createShare({ code, dateStart, dateEnd })
+        return res.json({ code })
+      } catch {
+        continue
+      }
+    }
+    return res
+      .status(500)
+      .json({ code: 'SHARE_CREATE_FAILED', error: '生成分享链接失败，请重试' })
+  })
+
+  /** 公开读取分享：不带令牌；实时从当前快照取该日期范围内的日程 */
+  app.get('/api/share/:code', (req, res) => {
+    const share = repository.getShare(req.params.code)
+    if (!share) {
+      return res
+        .status(404)
+        .json({ code: 'SHARE_NOT_FOUND', error: '分享链接不存在或已失效' })
+    }
+
+    const snapshot = repository.readSnapshot()
+    const plans = Array.isArray(snapshot.data?.plans) ? snapshot.data.plans : []
+    const viewPlans = plans
+      .filter((plan) => plan && plan.date >= share.dateStart && plan.date <= share.dateEnd)
+      .map((plan) => ({
+        title: plan.title || '未命名日程',
+        category: plan.category || '通用',
+        level: plan.level || '基础',
+        duration: Number(plan.duration) || 0,
+        date: plan.date,
+        startHour: Number(plan.startHour) || 0,
+        done: Boolean(plan.done),
+      }))
+
+    res.json({ dateStart: share.dateStart, dateEnd: share.dateEnd, plans: viewPlans })
   })
 
   app.use('/api', (req, res) => {

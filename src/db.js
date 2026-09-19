@@ -28,6 +28,16 @@ export function openDatabase(dbPath) {
     );
   `)
 
+  // 分享链接：只存日期范围，访问时从当前快照实时裁剪（不落冻结数据）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS share_links (
+      code        TEXT PRIMARY KEY,
+      date_start  TEXT NOT NULL,
+      date_end    TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    );
+  `)
+
   return db
 }
 
@@ -43,6 +53,14 @@ export function createRepository(db) {
       schema_version = excluded.schema_version,
       updated_at     = excluded.updated_at
   `)
+
+  const insertShareStmt = db.prepare(
+    'INSERT INTO share_links (code, date_start, date_end, created_at) VALUES (?, ?, ?, ?)',
+  )
+  const selectShareStmt = db.prepare(
+    'SELECT code, date_start, date_end, created_at FROM share_links WHERE code = ?',
+  )
+  const deleteShareStmt = db.prepare('DELETE FROM share_links WHERE code = ?')
 
   /** @returns {{ rev: number, updatedAt: string|null, data: object|null }} */
   function readSnapshot() {
@@ -97,5 +115,27 @@ export function createRepository(db) {
     }
   }
 
-  return { readSnapshot, readRev, writeSnapshot }
+  /** 写入一条分享链接（code 已存在时抛错，由调用方重试新 code） */
+  function createShare({ code, dateStart, dateEnd }) {
+    insertShareStmt.run(code, dateStart, dateEnd, new Date().toISOString())
+    return { code, dateStart, dateEnd }
+  }
+
+  /** @returns {{ code, dateStart, dateEnd, createdAt }|null} */
+  function getShare(code) {
+    const row = selectShareStmt.get(code)
+    if (!row) return null
+    return {
+      code: row.code,
+      dateStart: row.date_start,
+      dateEnd: row.date_end,
+      createdAt: row.created_at,
+    }
+  }
+
+  function deleteShare(code) {
+    deleteShareStmt.run(code)
+  }
+
+  return { readSnapshot, readRev, writeSnapshot, createShare, getShare, deleteShare }
 }
