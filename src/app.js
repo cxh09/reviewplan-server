@@ -164,7 +164,14 @@ export function createApp({ config, repository }) {
         done: Boolean(plan.done),
       }))
 
-    res.json({ dateStart: share.dateStart, dateEnd: share.dateEnd, plans: viewPlans })
+    // 分享署名：把作者资料随快照实时透出，旧快照没有 profile 时返回 null
+    const rawProfile = snapshot.data?.profile
+    const profile =
+      rawProfile && typeof rawProfile === 'object'
+        ? { name: `${rawProfile.name || ''}`, avatar: `${rawProfile.avatar || ''}` }
+        : null
+
+    res.json({ dateStart: share.dateStart, dateEnd: share.dateEnd, profile, plans: viewPlans })
   })
 
   app.use('/api', (req, res) => {
