@@ -46,6 +46,10 @@ export const config = {
   dbPath: process.env.DB_PATH
     ? path.resolve(process.env.DB_PATH)
     : path.join(SERVER_ROOT, 'data', 'reviewplan.db'),
+  /** 完成详情的图片 / 附件落盘目录，公开托管在 /uploads/ 下 */
+  uploadDir: process.env.UPLOAD_DIR
+    ? path.resolve(process.env.UPLOAD_DIR)
+    : path.join(SERVER_ROOT, 'data', 'uploads'),
   /** 访问令牌：数据接口都要求 Authorization: Bearer <token>，默认用硬编码的那一份 */
   accessToken: resolveAccessToken(),
   /** 允许的跨域来源，逗号分隔；默认 * （适合本地 / 局域网使用） */
