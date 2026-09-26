@@ -110,16 +110,72 @@ export function createApp({ config, repository }) {
     }
     // 文件名完全随机不可枚举：分享页免登录看图的前提；扩展名由白名单 mime 决定，不信任客户端
     const fileName = `${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}.${ext}`
+    const origName = `${name ?? ''}`.slice(0, 120)
     try {
       fs.writeFileSync(path.join(config.uploadDir, fileName), buffer)
+      // 原始名存 sidecar：托管时通过 Content-Disposition 透出，
+      // 浏览器标签页优先用它，避免 PDF 元数据里的标题乱码
+      if (origName) {
+        fs.writeFileSync(path.join(config.uploadDir, `${fileName}.name`), origName)
+      }
     } catch {
       return res.status(500).json({ code: 'UPLOAD_FAILED', error: '文件写入失败' })
     }
-    res.json({ url: `/uploads/${fileName}`, name: `${name ?? ''}`.slice(0, 120) })
+    res.json({ url: `/uploads/${fileName}`, name: origName })
   })
 
   // 上传件公开只读（分享页无令牌也要看图）；文件名随机 + 内容不变，长缓存安全
+  app.use('/uploads', (req, res, next) => {
+    const base = decodeURIComponent(req.path.split('/').pop() || '')
+    // sidecar 存的是原始名，不对外直读
+    if (!base || base.endsWith('.name')) return res.status(404).end()
+    try {
+      const orig = fs.readFileSync(path.join(config.uploadDir, `${base}.name`), 'utf8').trim()
+      // inline + RFC 5987 编码：中文文件名不乱码，图片/PDF 仍可在浏览器内打开
+      if (orig) {
+        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(orig)}`)
+      }
+    } catch {
+      /* 无原始名（历史上传件）则保持默认行为 */
+    }
+    next()
+  })
   app.use('/uploads', express.static(config.uploadDir, { maxAge: '30d', index: false }))
+
+  /**
+   * 历史上传件回填 sidecar：启动时扫一遍快照里的文件引用，
+   * 把带原始名的补写 .name，让旧附件的标签页标题也不再乱码。
+   */
+  ;(function backfillUploadNames() {
+    try {
+      const { data } = repository.readSnapshot() || {}
+      if (!data) return
+      const queue = [data]
+      while (queue.length) {
+        const node = queue.pop()
+        if (Array.isArray(node)) {
+          queue.push(...node)
+        } else if (node && typeof node === 'object') {
+          const url = typeof node.url === 'string' ? node.url : ''
+          const orig = typeof node.name === 'string' ? node.name.trim() : ''
+          const matched = /^\/uploads\/([\w.-]+)$/.exec(url)
+          if (matched && orig) {
+            const sidecar = path.join(config.uploadDir, `${matched[1]}.name`)
+            if (!fs.existsSync(sidecar) && fs.existsSync(path.join(config.uploadDir, matched[1]))) {
+              try {
+                fs.writeFileSync(sidecar, orig.slice(0, 120))
+              } catch {
+                /* 单个回填失败不影响启动 */
+              }
+            }
+          }
+          queue.push(...Object.values(node))
+        }
+      }
+    } catch {
+      /* 无快照或读取失败时跳过回填 */
+    }
+  })()
 
   app.use(express.json({ limit: BODY_LIMIT }))
 
